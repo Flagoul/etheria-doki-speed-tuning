@@ -9,66 +9,243 @@ input,select,button{padding:8px;border-radius:6px;border:1px solid #4b5563;backg
 canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block}.stats{display:flex;gap:8px;flex-wrap:wrap}.stat{padding:7px 10px;background:#1f2937;border:1px solid #3b475a;border-radius:7px;font-size:13px}
 .legend{display:flex;gap:15px;flex-wrap:wrap;margin-top:10px;font-size:13px;color:#cbd5e1}.sw{display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;margin-right:5px}
 #tip{position:fixed;display:none;background:#0b1020;border:1px solid #59677f;border-radius:6px;padding:8px;pointer-events:none;font-size:12px}
+#status{font-size:12px;color:#9fb0c6;margin-top:6px}
 </style></head>
 <body><div class="wrap">
 <h1>Turn Meter Analyzer</h1>
-<p>Interactive 3- and 4-character heatmap. Exact +12 TM simulation, 8 hits, random branches preserved.</p>
+<p>Interactive 3- and 4-character heatmap. Unrounded TM, exact +12 pushes from Doki over 8 hits, 0.5% tie tolerance, all random branches preserved.</p>
 <div class="controls">
-<label>Team<select id="mode"><option value="3">3 Character Team</option><option value="4">4 Character Team</option></select></label>
-<label>A Speed<input id="A" type="number" value="384"></label>
-<div id="four" style="display:none;gap:12px;align-items:end"><label>Fixed Character<select id="fc"><option>B</option><option>C</option><option>D</option></select></label>
-<label>Fixed Speed<input id="fs" type="number" value="216"></label></div>
-<label>Min<input id="mn" type="number" value="200"></label>
-<label>Max<input id="mx" type="number" value="375"></label>
+<label>Team<select id="teamSizeSelect"><option value="3">3 Character Team</option><option value="4">4 Character Team</option></select></label>
+<label>Doki Speed<input id="dokiSpeedInput" type="number" value="375"></label>
+<label>Tie Tolerance %<input id="tieTolerancePercentInput" type="number" value="0.5" step="0.1" min="0"></label>
+<div id="fourCharacterControls" style="display:none;gap:12px;align-items:end">
+<label>Fixed Character<select id="fixedCharacterSelect"><option value="DPS">DPS</option><option value="Support">Support</option><option value="Support2">Support 2</option></select></label>
+<label>Fixed Speed<input id="fixedSpeedInput" type="number" value="216"></label>
+</div>
+<label>Min<input id="minSpeedInput" type="number" value="200"></label>
+<label>Max<input id="maxSpeedInput" type="number" value="375"></label>
 <button onclick="draw()">Calculate</button></div>
 <div id="stats" class="stats"></div>
-<div class="chart"><canvas id="cv" width="800" height="800"></canvas>
-<div class="legend"><span><i class="sw" style="background:#4b155e"></i>B NOT LAST</span><span><i class="sw" style="background:#3b82a0"></i>B LAST</span><span><i class="sw" style="background:#19a89b"></i>TIE-BREAKER</span><span><i class="sw" style="background:#f4df1a"></i>RANDOM</span></div></div>
+<div id="status"></div>
+<div class="chart"><canvas id="heatmapCanvas" width="800" height="800"></canvas>
+<div class="legend"><span><i class="sw" style="background:#4b155e"></i>DPS NOT LAST</span><span><i class="sw" style="background:#3b82a0"></i>DPS LAST</span><span><i class="sw" style="background:#19a89b"></i>TIE-BREAKER</span><span><i class="sw" style="background:#f4df1a"></i>RANDOM</span></div></div>
 </div><div id="tip"></div>
 <script>
-const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),tip=document.getElementById('tip');
-const colors=['#4b155e','#3b82a0','#19a89b','#f4df1a'];
-function tm(s,a){return Math.floor(s/a*100+.5)}
-function c3(B,C,A){
- let memo=new Map(),bi=tm(B,A),ci=tm(C,A);
- function f(h,b,c){let k=h+'|'+b+'|'+c;if(memo.has(k))return memo.get(k);
-  if(!h){let r=b<c?1:b>c?2:B<C?1:B>C?2:4;memo.set(k,r);return r}
-  let m=Math.min(b,c),r=0;if(b==m)r|=f(h-1,b+12,c);if(c==m)r|=f(h-1,b,c+12);memo.set(k,r);return r}
- return f(8,bi,ci)
+const heatmapCanvas = document.getElementById('heatmapCanvas');
+const ctx = heatmapCanvas.getContext('2d');
+const tooltipEl = document.getElementById('tip');
+const statusEl = document.getElementById('status');
+const outcomeColors = ['#4b155e', '#3b82a0', '#19a89b', '#f4df1a'];
+
+// ---------- Core exact-decimal TM model ----------
+
+// Initial TM is unrounded: (character speed / Doki speed) * 100
+function initialTurnMeter(characterSpeed, dokiSpeed){
+  return characterSpeed / dokiSpeed * 100;
 }
-function c4(B,C,D,A){
- let memo=new Map(),bi=tm(B,A),ci=tm(C,A),di=tm(D,A);
- function f(h,b,c,d){let k=h+'|'+b+'|'+c+'|'+d;if(memo.has(k))return memo.get(k);
-  if(!h){
-   let bc=b<c?1:b>c?2:B<C?1:B>C?2:4,bd=b<d?1:b>d?2:B<D?1:B>D?2:4;
-   let r=bc==1&&bd==1?1:(bc==2||bd==2?2:4);memo.set(k,r);return r}
-  let m=Math.min(b,c,d),r=0;if(b==m)r|=f(h-1,b+12,c,d);if(c==m)r|=f(h-1,b,c+12,d);if(d==m)r|=f(h-1,b,c,d+12);memo.set(k,r);return r}
- return f(8,bi,ci,di)
+
+// Two TM values are effectively tied when |TM1-TM2| <= tieToleranceFraction * max(TM1,TM2)
+// tieToleranceFraction defaults to 0.005 (0.5%) but is configurable from the UI.
+function isTurnMeterTie(turnMeter1, turnMeter2, tieToleranceFraction){
+  const difference = Math.abs(turnMeter1 - turnMeter2);
+  const tolerance = tieToleranceFraction * Math.max(turnMeter1, turnMeter2);
+  return difference <= tolerance;
 }
-function label(mask){return mask==1?'B LAST':mask==2?'B NOT LAST':mask==4?'TIE-BREAKER':(mask&4?'TIE-BREAKER':'RANDOM')}
+
+// Simulate `hitCount` pushes of +12 against a set of initial TM values
+// (DPS, Support[, Support 2]). After every push, every character within the
+// 0.5% tolerance of the current minimum is a possible recipient, so the
+// simulation branches into every tied outcome. Returns every possible final
+// state as an array of turn-meter arrays.
+function simulateFinalTurnMeterStates(initialTurnMeters, hitCount, tieToleranceFraction){
+  let candidateStates = [initialTurnMeters.slice()];
+  for (let hit = 0; hit < hitCount; hit++){
+    const nextStates = new Map();
+    for (const state of candidateStates){
+      let minimumTurnMeter = state[0];
+      for (let i = 1; i < state.length; i++){
+        if (state[i] < minimumTurnMeter) minimumTurnMeter = state[i];
+      }
+      for (let i = 0; i < state.length; i++){
+        if (isTurnMeterTie(state[i], minimumTurnMeter, tieToleranceFraction)){
+          const nextState = state.slice();
+          nextState[i] += 12;
+          const stateKey = nextState.map(v => v.toFixed(6)).join('|');
+          if (!nextStates.has(stateKey)) nextStates.set(stateKey, nextState);
+        }
+      }
+    }
+    candidateStates = Array.from(nextStates.values());
+  }
+  return candidateStates;
+}
+
+// Final-order verdict for DPS in a single branch.
+// Returns bit 1 = DPS acts last (TRUE), bit 2 = DPS does not act last (FALSE),
+// bit 4 = UNKNOWN / equal-TM-and-equal-Speed tie-breaker.
+function verdictForDPS(dpsFinalTurnMeter, dpsSpeed, opponents, tieToleranceFraction){
+  let dpsAheadOfSomeone = false;
+  let unresolvedTie = false;
+  for (const opponent of opponents){
+    if (isTurnMeterTie(dpsFinalTurnMeter, opponent.turnMeter, tieToleranceFraction)){
+      if (dpsSpeed < opponent.speed) continue;            // DPS behind this opponent
+      else if (dpsSpeed > opponent.speed) dpsAheadOfSomeone = true;
+      else unresolvedTie = true;                            // equal TM, equal Speed
+    } else if (dpsFinalTurnMeter < opponent.turnMeter){
+      continue;                                              // DPS behind this opponent
+    } else {
+      dpsAheadOfSomeone = true;                              // DPS ahead of this opponent
+    }
+  }
+  if (dpsAheadOfSomeone) return 2;
+  if (unresolvedTie) return 4;
+  return 1;
+}
+
+// Classify a full cell: run every branch, OR together every branch's verdict bit.
+// mask==1 -> always TRUE, mask==2 -> always FALSE, mask==4 -> always UNKNOWN,
+// anything else (multiple bits set) -> RANDOM (branches disagree).
+function classifyOutcome(initialTurnMeters, speeds, dpsIndex, tieToleranceFraction){
+  const finalStates = simulateFinalTurnMeterStates(initialTurnMeters, 8, tieToleranceFraction);
+  let outcomeMask = 0;
+  for (const state of finalStates){
+    const dpsFinalTurnMeter = state[dpsIndex];
+    const opponents = [];
+    for (let i = 0; i < state.length; i++){
+      if (i === dpsIndex) continue;
+      opponents.push({ turnMeter: state[i], speed: speeds[i] });
+    }
+    outcomeMask |= verdictForDPS(dpsFinalTurnMeter, speeds[dpsIndex], opponents, tieToleranceFraction);
+    if (outcomeMask === 7) break; // already RANDOM (all three outcomes present)
+  }
+  return outcomeMask;
+}
+
+function classifyThreeCharacterTeam(dpsSpeed, supportSpeed, dokiSpeed, tieToleranceFraction){
+  const dpsInitialTM = initialTurnMeter(dpsSpeed, dokiSpeed);
+  const supportInitialTM = initialTurnMeter(supportSpeed, dokiSpeed);
+  return classifyOutcome([dpsInitialTM, supportInitialTM], [dpsSpeed, supportSpeed], 0, tieToleranceFraction);
+}
+function classifyFourCharacterTeam(dpsSpeed, supportSpeed, support2Speed, dokiSpeed, tieToleranceFraction){
+  const dpsInitialTM = initialTurnMeter(dpsSpeed, dokiSpeed);
+  const supportInitialTM = initialTurnMeter(supportSpeed, dokiSpeed);
+  const support2InitialTM = initialTurnMeter(support2Speed, dokiSpeed);
+  return classifyOutcome([dpsInitialTM, supportInitialTM, support2InitialTM], [dpsSpeed, supportSpeed, support2Speed], 0, tieToleranceFraction);
+}
+function outcomeLabel(mask){
+  if (mask === 1) return 'DPS LAST';
+  if (mask === 2) return 'DPS NOT LAST';
+  if (mask === 4) return 'TIE-BREAKER (unknown)';
+  return 'RANDOM';
+}
+
+// ---------- UI / heatmap rendering ----------
+
 function draw(){
- let A=+document.getElementById('A').value,min=+document.getElementById('mn').value,max=+document.getElementById('mx').value;
- let four=document.getElementById('mode').value=='4',fc=document.getElementById('fc').value,fs=+document.getElementById('fs').value;
- let s=[];for(let x=min;x<=max;x++)s.push(x);let n=s.length,p=55,W=720,H=720,cw=W/n,ch=H/n,data=[],cnt=[0,0,0,0];
- ctx.clearRect(0,0,800,800);
- for(let r=0;r<n;r++){data[r]=[];for(let q=0;q<n;q++){
-  let x=s[q],y=s[n-1-r],mask, xn,yn;
-  if(!four){mask=c3(x,y,A);xn='B';yn='C'}else{
-   let B,C,D;if(fc=='B'){B=fs;C=x;D=y;xn='C';yn='D'}else if(fc=='C'){B=x;C=fs;D=y;xn='B';yn='D'}else{B=x;C=y;D=fs;xn='B';yn='C'}
-   mask=c4(B,C,D,A)}
-  let z=mask==1?1:mask==2?0:(mask==4||mask&4?2:3);cnt[z]++;data[r][q]={x,y,mask,xn,yn};
-  ctx.fillStyle=colors[z];ctx.fillRect(p+q*cw,20+r*ch,Math.ceil(cw)+1,Math.ceil(ch)+1);
- }}
- ctx.fillStyle='#ddd';ctx.font='12px system-ui';ctx.textAlign='center';
- let step=n>120?25:Math.max(1,Math.ceil(n/7));
- for(let x=Math.ceil(min/step)*step;x<=max;x+=step){let q=x-min,xx=p+(q+.5)*cw;ctx.fillText(x,xx,760);let row=max-x,yy=20+(row+.5)*ch;ctx.textAlign='right';ctx.fillText(x,47,yy+4);ctx.textAlign='center'}
- ctx.fillText(four?(fc=='B'?'C':fc=='C'?'B':'B')+' Speed':'B Speed',p+W/2,790);
- ctx.save();ctx.translate(12,380);ctx.rotate(-Math.PI/2);ctx.fillText(four?(fc=='B'?'D':'D')+' Speed':'C Speed',0,0);ctx.restore();
- document.getElementById('stats').innerHTML=['B NOT LAST','B LAST','TIE-BREAKER','RANDOM'].map((x,i)=>'<div class="stat">'+x+' <b>'+cnt[i].toLocaleString()+'</b></div>').join('');
- cv._p={data,p,cw,ch,s,A,four,fc,fs};
+  statusEl.textContent = 'Calculating...';
+  // let the browser paint the status text before the (possibly heavy) sync work
+  setTimeout(runDraw, 0);
 }
-document.getElementById('mode').onchange=()=>document.getElementById('four').style.display=document.getElementById('mode').value=='4'?'flex':'none';
-cv.onmousemove=e=>{let p=cv._p;if(!p)return;let r=cv.getBoundingClientRect(),x=(e.clientX-r.left)*cv.width/r.width,y=(e.clientY-r.top)*cv.height/r.height,q=Math.floor((x-p.p)/p.cw),row=Math.floor((y-20)/p.ch);if(q<0||row<0||q>=p.s.length||row>=p.s.length){tip.style.display='none';return}let d=p.data[row][q];tip.style.display='block';tip.style.left=e.clientX+12+'px';tip.style.top=e.clientY+12+'px';tip.innerHTML='<b>'+d.xn+' '+d.x+' SPD</b> × <b>'+d.yn+' '+d.y+' SPD</b><br>'+label(d.mask);};
-cv.onmouseleave=()=>tip.style.display='none';
+
+function runDraw(){
+  const startTime = performance.now();
+  const dokiSpeed = +document.getElementById('dokiSpeedInput').value;
+  const minSpeed = +document.getElementById('minSpeedInput').value;
+  const maxSpeed = +document.getElementById('maxSpeedInput').value;
+  const isFourCharacterTeam = document.getElementById('teamSizeSelect').value == '4';
+  const fixedCharacter = document.getElementById('fixedCharacterSelect').value;
+  const fixedSpeed = +document.getElementById('fixedSpeedInput').value;
+  const tieToleranceFraction = (+document.getElementById('tieTolerancePercentInput').value) / 100;
+
+  const speedValues = [];
+  for (let speed = minSpeed; speed <= maxSpeed; speed++) speedValues.push(speed);
+  const gridSize = speedValues.length;
+  const plotOriginX = 55, plotWidth = 720, plotHeight = 720;
+  const cellWidth = plotWidth / gridSize, cellHeight = plotHeight / gridSize;
+  const cellData = [];
+  const outcomeCounts = [0, 0, 0, 0];
+
+  ctx.clearRect(0, 0, 800, 800);
+  for (let row = 0; row < gridSize; row++){
+    cellData[row] = [];
+    for (let col = 0; col < gridSize; col++){
+      const xSpeed = speedValues[col], ySpeed = speedValues[gridSize - 1 - row];
+      let outcomeMask, xAxisName, yAxisName;
+      if (!isFourCharacterTeam){
+        outcomeMask = classifyThreeCharacterTeam(xSpeed, ySpeed, dokiSpeed, tieToleranceFraction);
+        xAxisName = 'DPS'; yAxisName = 'Support';
+      } else {
+        let dpsSpeed, supportSpeed, support2Speed;
+        if (fixedCharacter == 'DPS'){
+          dpsSpeed = fixedSpeed; supportSpeed = xSpeed; support2Speed = ySpeed;
+          xAxisName = 'Support'; yAxisName = 'Support 2';
+        } else if (fixedCharacter == 'Support'){
+          dpsSpeed = xSpeed; supportSpeed = fixedSpeed; support2Speed = ySpeed;
+          xAxisName = 'DPS'; yAxisName = 'Support 2';
+        } else {
+          dpsSpeed = xSpeed; supportSpeed = ySpeed; support2Speed = fixedSpeed;
+          xAxisName = 'DPS'; yAxisName = 'Support';
+        }
+        outcomeMask = classifyFourCharacterTeam(dpsSpeed, supportSpeed, support2Speed, dokiSpeed, tieToleranceFraction);
+      }
+      const colorIndex = outcomeMask == 1 ? 1 : outcomeMask == 2 ? 0 : outcomeMask == 4 ? 2 : 3;
+      outcomeCounts[colorIndex]++;
+      cellData[row][col] = { xSpeed, ySpeed, outcomeMask, xAxisName, yAxisName };
+      ctx.fillStyle = outcomeColors[colorIndex];
+      ctx.fillRect(plotOriginX + col * cellWidth, 20 + row * cellHeight, Math.ceil(cellWidth) + 1, Math.ceil(cellHeight) + 1);
+    }
+  }
+
+  ctx.fillStyle = '#ddd'; ctx.font = '12px system-ui'; ctx.textAlign = 'center';
+  const tickStep = gridSize > 120 ? 25 : Math.max(1, Math.ceil(gridSize / 7));
+  for (let speed = Math.ceil(minSpeed / tickStep) * tickStep; speed <= maxSpeed; speed += tickStep){
+    const col = speed - minSpeed, tickX = plotOriginX + (col + .5) * cellWidth;
+    ctx.fillText(speed, tickX, 760);
+    const row = maxSpeed - speed, tickY = 20 + (row + .5) * cellHeight;
+    ctx.textAlign = 'right'; ctx.fillText(speed, 47, tickY + 4); ctx.textAlign = 'center';
+  }
+
+  let xAxisLabel, yAxisLabel;
+  if (!isFourCharacterTeam){
+    xAxisLabel = 'DPS Speed'; yAxisLabel = 'Support Speed';
+  } else if (fixedCharacter == 'DPS'){
+    xAxisLabel = 'Support Speed'; yAxisLabel = 'Support 2 Speed';
+  } else if (fixedCharacter == 'Support'){
+    xAxisLabel = 'DPS Speed'; yAxisLabel = 'Support 2 Speed';
+  } else {
+    xAxisLabel = 'DPS Speed'; yAxisLabel = 'Support Speed';
+  }
+  ctx.fillText(xAxisLabel, plotOriginX + plotWidth / 2, 790);
+  ctx.save(); ctx.translate(12, 380); ctx.rotate(-Math.PI / 2); ctx.fillText(yAxisLabel, 0, 0); ctx.restore();
+
+  document.getElementById('stats').innerHTML = ['DPS NOT LAST', 'DPS LAST', 'TIE-BREAKER', 'RANDOM']
+    .map((name, i) => '<div class="stat">' + name + ' <b>' + outcomeCounts[i].toLocaleString() + '</b></div>').join('');
+
+  heatmapCanvas._plotState = { cellData, plotOriginX, cellWidth, cellHeight, speedValues };
+  const endTime = performance.now();
+  statusEl.textContent = gridSize.toLocaleString() + '×' + gridSize.toLocaleString() + ' cells, exact TM + ' + (tieToleranceFraction * 100) + '% tolerance model, computed in ' + Math.round(endTime - startTime) + ' ms.';
+}
+
+document.getElementById('teamSizeSelect').onchange = () =>
+  document.getElementById('fourCharacterControls').style.display = document.getElementById('teamSizeSelect').value == '4' ? 'flex' : 'none';
+
+heatmapCanvas.onmousemove = e => {
+  const plotState = heatmapCanvas._plotState; if (!plotState) return;
+  const rect = heatmapCanvas.getBoundingClientRect();
+  const canvasX = (e.clientX - rect.left) * heatmapCanvas.width / rect.width;
+  const canvasY = (e.clientY - rect.top) * heatmapCanvas.height / rect.height;
+  const col = Math.floor((canvasX - plotState.plotOriginX) / plotState.cellWidth);
+  const row = Math.floor((canvasY - 20) / plotState.cellHeight);
+  if (col < 0 || row < 0 || col >= plotState.speedValues.length || row >= plotState.speedValues.length){
+    tooltipEl.style.display = 'none'; return;
+  }
+  const cell = plotState.cellData[row][col];
+  tooltipEl.style.display = 'block';
+  tooltipEl.style.left = e.clientX + 12 + 'px';
+  tooltipEl.style.top = e.clientY + 12 + 'px';
+  tooltipEl.innerHTML = '<b>' + cell.xAxisName + ' ' + cell.xSpeed + ' SPD</b> × <b>' + cell.yAxisName + ' ' + cell.ySpeed + ' SPD</b><br>' + outcomeLabel(cell.outcomeMask);
+};
+heatmapCanvas.onmouseleave = () => tooltipEl.style.display = 'none';
+
 draw();
 </script></body></html>
