@@ -1,0 +1,74 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Turn Meter Analyzer</title>
+<style>
+body{font-family:system-ui;margin:0;background:#111827;color:#eee}.wrap{max-width:1100px;margin:auto;padding:20px}
+.controls,.chart{background:#1f2937;border:1px solid #3b475a;border-radius:12px;padding:14px;margin:12px 0}
+.controls{display:flex;gap:12px;flex-wrap:wrap;align-items:end}label{font-size:12px;color:#b8c2d1;display:flex;flex-direction:column;gap:4px}
+input,select,button{padding:8px;border-radius:6px;border:1px solid #4b5563;background:#273449;color:#fff}button{background:#eee;color:#111;font-weight:bold;cursor:pointer}
+canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block}.stats{display:flex;gap:8px;flex-wrap:wrap}.stat{padding:7px 10px;background:#1f2937;border:1px solid #3b475a;border-radius:7px;font-size:13px}
+.legend{display:flex;gap:15px;flex-wrap:wrap;margin-top:10px;font-size:13px;color:#cbd5e1}.sw{display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+#tip{position:fixed;display:none;background:#0b1020;border:1px solid #59677f;border-radius:6px;padding:8px;pointer-events:none;font-size:12px}
+</style></head>
+<body><div class="wrap">
+<h1>Turn Meter Analyzer</h1>
+<p>Interactive 3- and 4-character heatmap. Exact +12 TM simulation, 8 hits, random branches preserved.</p>
+<div class="controls">
+<label>Team<select id="mode"><option value="3">3 Character Team</option><option value="4">4 Character Team</option></select></label>
+<label>A Speed<input id="A" type="number" value="384"></label>
+<div id="four" style="display:none;gap:12px;align-items:end"><label>Fixed Character<select id="fc"><option>B</option><option>C</option><option>D</option></select></label>
+<label>Fixed Speed<input id="fs" type="number" value="216"></label></div>
+<label>Min<input id="mn" type="number" value="200"></label>
+<label>Max<input id="mx" type="number" value="375"></label>
+<button onclick="draw()">Calculate</button></div>
+<div id="stats" class="stats"></div>
+<div class="chart"><canvas id="cv" width="800" height="800"></canvas>
+<div class="legend"><span><i class="sw" style="background:#4b155e"></i>B NOT LAST</span><span><i class="sw" style="background:#3b82a0"></i>B LAST</span><span><i class="sw" style="background:#19a89b"></i>TIE-BREAKER</span><span><i class="sw" style="background:#f4df1a"></i>RANDOM</span></div></div>
+</div><div id="tip"></div>
+<script>
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),tip=document.getElementById('tip');
+const colors=['#4b155e','#3b82a0','#19a89b','#f4df1a'];
+function tm(s,a){return Math.floor(s/a*100+.5)}
+function c3(B,C,A){
+ let memo=new Map(),bi=tm(B,A),ci=tm(C,A);
+ function f(h,b,c){let k=h+'|'+b+'|'+c;if(memo.has(k))return memo.get(k);
+  if(!h){let r=b<c?1:b>c?2:B<C?1:B>C?2:4;memo.set(k,r);return r}
+  let m=Math.min(b,c),r=0;if(b==m)r|=f(h-1,b+12,c);if(c==m)r|=f(h-1,b,c+12);memo.set(k,r);return r}
+ return f(8,bi,ci)
+}
+function c4(B,C,D,A){
+ let memo=new Map(),bi=tm(B,A),ci=tm(C,A),di=tm(D,A);
+ function f(h,b,c,d){let k=h+'|'+b+'|'+c+'|'+d;if(memo.has(k))return memo.get(k);
+  if(!h){
+   let bc=b<c?1:b>c?2:B<C?1:B>C?2:4,bd=b<d?1:b>d?2:B<D?1:B>D?2:4;
+   let r=bc==1&&bd==1?1:(bc==2||bd==2?2:4);memo.set(k,r);return r}
+  let m=Math.min(b,c,d),r=0;if(b==m)r|=f(h-1,b+12,c,d);if(c==m)r|=f(h-1,b,c+12,d);if(d==m)r|=f(h-1,b,c,d+12);memo.set(k,r);return r}
+ return f(8,bi,ci,di)
+}
+function label(mask){return mask==1?'B LAST':mask==2?'B NOT LAST':mask==4?'TIE-BREAKER':(mask&4?'TIE-BREAKER':'RANDOM')}
+function draw(){
+ let A=+document.getElementById('A').value,min=+document.getElementById('mn').value,max=+document.getElementById('mx').value;
+ let four=document.getElementById('mode').value=='4',fc=document.getElementById('fc').value,fs=+document.getElementById('fs').value;
+ let s=[];for(let x=min;x<=max;x++)s.push(x);let n=s.length,p=55,W=720,H=720,cw=W/n,ch=H/n,data=[],cnt=[0,0,0,0];
+ ctx.clearRect(0,0,800,800);
+ for(let r=0;r<n;r++){data[r]=[];for(let q=0;q<n;q++){
+  let x=s[q],y=s[n-1-r],mask, xn,yn;
+  if(!four){mask=c3(x,y,A);xn='B';yn='C'}else{
+   let B,C,D;if(fc=='B'){B=fs;C=x;D=y;xn='C';yn='D'}else if(fc=='C'){B=x;C=fs;D=y;xn='B';yn='D'}else{B=x;C=y;D=fs;xn='B';yn='C'}
+   mask=c4(B,C,D,A)}
+  let z=mask==1?1:mask==2?0:(mask==4||mask&4?2:3);cnt[z]++;data[r][q]={x,y,mask,xn,yn};
+  ctx.fillStyle=colors[z];ctx.fillRect(p+q*cw,20+r*ch,Math.ceil(cw)+1,Math.ceil(ch)+1);
+ }}
+ ctx.fillStyle='#ddd';ctx.font='12px system-ui';ctx.textAlign='center';
+ let step=n>120?25:Math.max(1,Math.ceil(n/7));
+ for(let x=Math.ceil(min/step)*step;x<=max;x+=step){let q=x-min,xx=p+(q+.5)*cw;ctx.fillText(x,xx,760);let row=max-x,yy=20+(row+.5)*ch;ctx.textAlign='right';ctx.fillText(x,47,yy+4);ctx.textAlign='center'}
+ ctx.fillText(four?(fc=='B'?'C':fc=='C'?'B':'B')+' Speed':'B Speed',p+W/2,790);
+ ctx.save();ctx.translate(12,380);ctx.rotate(-Math.PI/2);ctx.fillText(four?(fc=='B'?'D':'D')+' Speed':'C Speed',0,0);ctx.restore();
+ document.getElementById('stats').innerHTML=['B NOT LAST','B LAST','TIE-BREAKER','RANDOM'].map((x,i)=>'<div class="stat">'+x+' <b>'+cnt[i].toLocaleString()+'</b></div>').join('');
+ cv._p={data,p,cw,ch,s,A,four,fc,fs};
+}
+document.getElementById('mode').onchange=()=>document.getElementById('four').style.display=document.getElementById('mode').value=='4'?'flex':'none';
+cv.onmousemove=e=>{let p=cv._p;if(!p)return;let r=cv.getBoundingClientRect(),x=(e.clientX-r.left)*cv.width/r.width,y=(e.clientY-r.top)*cv.height/r.height,q=Math.floor((x-p.p)/p.cw),row=Math.floor((y-20)/p.ch);if(q<0||row<0||q>=p.s.length||row>=p.s.length){tip.style.display='none';return}let d=p.data[row][q];tip.style.display='block';tip.style.left=e.clientX+12+'px';tip.style.top=e.clientY+12+'px';tip.innerHTML='<b>'+d.xn+' '+d.x+' SPD</b> × <b>'+d.yn+' '+d.y+' SPD</b><br>'+label(d.mask);};
+cv.onmouseleave=()=>tip.style.display='none';
+draw();
+</script></body></html>
