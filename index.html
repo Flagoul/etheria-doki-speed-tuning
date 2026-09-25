@@ -171,6 +171,35 @@ function outcomeLabel(mask){
   return 'RANDOM';
 }
 
+// Compares two characters for final turn order: higher TM acts first; if tied
+// within tolerance, higher Speed acts first; if both TM and Speed are equal,
+// the order between them is unresolved (returns 0).
+function compareFinalOrder(tmA, speedA, tmB, speedB, tieToleranceFraction){
+  if (isTurnMeterTie(tmA, tmB, tieToleranceFraction)){
+    if (speedA !== speedB) return speedB - speedA;
+    return 0;
+  }
+  return tmB - tmA;
+}
+
+// Builds one line showing the whole team's final state, ordered from first
+// mover to last mover. An unresolved tie (equal TM and equal Speed) between
+// neighbors is shown with "≈" instead of "→".
+function buildTurnOrderLine(names, tmValues, speeds, tieToleranceFraction){
+  const order = names.map((_, i) => i).sort((a, b) => compareFinalOrder(tmValues[a], speeds[a], tmValues[b], speeds[b], tieToleranceFraction));
+  const parts = [];
+  for (let k = 0; k < order.length; k++){
+    const i = order[k];
+    parts.push(names[i] + ' ' + tmValues[i].toFixed(4));
+    if (k < order.length - 1){
+      const j = order[k + 1];
+      const unresolvedTie = isTurnMeterTie(tmValues[i], tmValues[j], tieToleranceFraction) && speeds[i] === speeds[j];
+      parts.push(unresolvedTie ? ' \u2248 ' : ' \u2192 ');
+    }
+  }
+  return parts.join('');
+}
+
 // ---------- Tick-by-tick trace (for the click panel) ----------
 
 // Builds, hit by hit, the distinct states reachable so far. Each entry records
@@ -229,7 +258,8 @@ function renderTracePanel(names, speeds, dokiSpeed, tieToleranceFraction, pushAm
     const opponents = [];
     for (let i = 1; i < names.length; i++) opponents.push({ turnMeter: entry.tm[i], speed: speeds[i] });
     const verdictMask = verdictForDPS(entry.tm[0], speeds[0], opponents, tieToleranceFraction);
-    html += '<div class="trace-final-line">' + names.map((n, i) => n + '=' + entry.tm[i].toFixed(4)).join(', ') + ' &rarr; <b>' + outcomeLabel(verdictMask) + '</b></div>';
+    const turnOrderLine = buildTurnOrderLine(names, entry.tm, speeds, tieToleranceFraction);
+    html += '<div class="trace-final-line">' + turnOrderLine + ' &nbsp;&mdash;&nbsp; <b>' + outcomeLabel(verdictMask) + '</b></div>';
   }
   html += '</div>';
 
@@ -325,8 +355,10 @@ function runDraw(){
   statusEl.textContent = gridSize.toLocaleString() + '×' + gridSize.toLocaleString() + ' cells, exact TM + ' + (tieToleranceFraction * 100) + '% tolerance, push=' + pushAmount + ', computed in ' + Math.round(endTime - startTime) + ' ms.';
 }
 
-document.getElementById('teamSizeSelect').onchange = () =>
+document.getElementById('teamSizeSelect').onchange = () => {
   document.getElementById('fourCharacterControls').style.display = document.getElementById('teamSizeSelect').value == '4' ? 'flex' : 'none';
+  draw();
+};
 
 function getCellFromEvent(e){
   const plotState = heatmapCanvas._plotState; if (!plotState) return null;
