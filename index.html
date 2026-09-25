@@ -39,13 +39,13 @@ canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block;c
 <div class="control-row">
 <label>Doki Speed<input id="dokiSpeedInput" type="number" value="375"></label>
 <div id="fixedCharacterControls" style="display:none;gap:12px;align-items:end">
-<label>Fixed Character<select id="fixedCharacterSelect"><option value="DPS">DPS</option><option value="Support">Support</option><option value="Support2">Support 2</option></select></label>
+<label>Fixed Character<select id="fixedCharacterSelect"><option value="DPS">Character 1</option><option value="Support">Character 2</option><option value="Support2">Character 3</option></select></label>
 <label>Fixed Speed<input id="fixedSpeedInput" type="number" value="216"></label>
 </div>
-<label>DPS Name<input id="dpsNameInput" type="text" value="Xiada"></label>
-<label>Support Name<input id="supportNameInput" type="text" value="Ninfoniel"></label>
+<label>Character 1 Name<input id="dpsNameInput" type="text" value="Xiada"></label>
+<label>Character 2 Name<input id="supportNameInput" type="text" value="Ninfoniel"></label>
 <div id="support2NameControls" style="display:none;gap:12px;align-items:end">
-<label>Support 2 Name<input id="support2NameInput" type="text" value="Areal"></label>
+<label>Character 3 Name<input id="support2NameInput" type="text" value="Areal"></label>
 </div>
 </div>
 <div class="control-row">
@@ -53,7 +53,7 @@ canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block;c
 <label>Max<input id="maxSpeedInput" type="number" value="375"></label>
 <label>Tie Tolerance %<input id="tieTolerancePercentInput" type="number" value="0.5" step="0.1" min="0"></label>
 <label>Push Amount (TM pts)<input id="pushAmountInput" type="number" value="12" step="1"></label>
-<label id="colorByContainer" style="display:none">Color By<select id="colorByModeSelect"><option value="dps">DPS Last / Not Last</option><option value="order" selected>Full Turn Order</option></select></label>
+<label id="colorByContainer" style="display:none">Color By<select id="colorByModeSelect"><option value="dps">Character 1 Last / Not Last</option><option value="order" selected>Full Turn Order</option></select></label>
 <button onclick="draw()">Calculate</button>
 </div>
 </div>
@@ -166,9 +166,19 @@ function verdictForDPS(dpsFinalTurnMeter, dpsSpeed, opponents, tieToleranceFract
 }
 
 function dpsOutcomeLabel(mask, dpsDisplayName){
-  const label = dpsDisplayName || 'DPS';
+  const label = dpsDisplayName || 'Character 1';
   if (mask === 1) return label + ' LAST';
   if (mask === 2) return label + ' NOT LAST';
+  if (mask === 4) return 'TIE-BREAKER (unknown)';
+  return 'RANDOM';
+}
+
+// For 3-character teams (2 non-Doki characters), "LAST/NOT LAST" is really
+// just one of the two possible turn orders, so express it the same way the
+// Full Turn Order mode does for consistency, instead of DPS-specific wording.
+function twoCharacterOrderLabel(mask, names){
+  if (mask === 1) return names[1] + ' \u2192 ' + names[0]; // Character 1 last -> Character 2 acted first
+  if (mask === 2) return names[0] + ' \u2192 ' + names[1]; // Character 1 not last -> acted first
   if (mask === 4) return 'TIE-BREAKER (unknown)';
   return 'RANDOM';
 }
@@ -419,9 +429,9 @@ function runDraw(){
   const pushAmount = +document.getElementById('pushAmountInput').value;
   const colorByMode = isFourCharacterTeam ? document.getElementById('colorByModeSelect').value : 'dps';
 
-  const dpsName = document.getElementById('dpsNameInput').value || 'DPS';
-  const supportName = document.getElementById('supportNameInput').value || 'Support';
-  const support2Name = document.getElementById('support2NameInput').value || 'Support 2';
+  const dpsName = document.getElementById('dpsNameInput').value || 'Character 1';
+  const supportName = document.getElementById('supportNameInput').value || 'Character 2';
+  const support2Name = document.getElementById('support2NameInput').value || 'Character 3';
   const names = isFourCharacterTeam ? [dpsName, supportName, support2Name] : [dpsName, supportName];
   const permutationKeys = generatePermutationKeys(names.length);
 
@@ -551,11 +561,13 @@ function paint(colorByMode){
       uncertainLegend;
   } else {
     const dpsLabel = names[0];
-    document.getElementById('stats').innerHTML = [dpsLabel + ' NOT LAST', dpsLabel + ' LAST', 'TIE-BREAKER', 'RANDOM']
+    const notLastLabel = plotState.isFourCharacterTeam ? (dpsLabel + ' NOT LAST') : twoCharacterOrderLabel(2, names);
+    const lastLabel = plotState.isFourCharacterTeam ? (dpsLabel + ' LAST') : twoCharacterOrderLabel(1, names);
+    document.getElementById('stats').innerHTML = [notLastLabel, lastLabel, 'TIE-BREAKER', 'RANDOM']
       .map((name, i) => '<div class="stat">' + name + ' <b>' + dpsCounts[i].toLocaleString() + '</b></div>').join('') +
       uncertainStat;
-    legendContainerEl.innerHTML = '<span><i class="sw" style="background:' + dpsModeColors[0] + '"></i>' + dpsLabel + ' NOT LAST</span>' +
-      '<span><i class="sw" style="background:' + dpsModeColors[1] + '"></i>' + dpsLabel + ' LAST</span>' +
+    legendContainerEl.innerHTML = '<span><i class="sw" style="background:' + dpsModeColors[0] + '"></i>' + notLastLabel + '</span>' +
+      '<span><i class="sw" style="background:' + dpsModeColors[1] + '"></i>' + lastLabel + '</span>' +
       '<span><i class="sw" style="background:' + dpsModeColors[2] + '"></i>TIE-BREAKER</span>' +
       '<span><i class="sw" style="background:' + dpsModeColors[3] + '"></i>RANDOM</span>' +
       uncertainLegend;
@@ -563,9 +575,9 @@ function paint(colorByMode){
 }
 
 function syncFixedCharacterOptionLabels(){
-  const dpsName = document.getElementById('dpsNameInput').value || 'DPS';
-  const supportName = document.getElementById('supportNameInput').value || 'Support';
-  const support2Name = document.getElementById('support2NameInput').value || 'Support 2';
+  const dpsName = document.getElementById('dpsNameInput').value || 'Character 1';
+  const supportName = document.getElementById('supportNameInput').value || 'Character 2';
+  const support2Name = document.getElementById('support2NameInput').value || 'Character 3';
   const select = document.getElementById('fixedCharacterSelect');
   select.options[0].textContent = dpsName;
   select.options[1].textContent = supportName;
@@ -609,7 +621,7 @@ heatmapCanvas.onmousemove = e => {
     else if (cell.orderResult.type === 'TIE') bodyLine = 'TIE-BREAKER (unknown)';
     else bodyLine = cell.orderResult.key.split('>').map(idx => plotState.names[+idx]).join(' \u2192 ');
   } else {
-    bodyLine = dpsOutcomeLabel(cell.dpsMask, plotState.names[0]);
+    bodyLine = plotState.isFourCharacterTeam ? dpsOutcomeLabel(cell.dpsMask, plotState.names[0]) : twoCharacterOrderLabel(cell.dpsMask, plotState.names);
   }
   if (cell.isUncertain) bodyLine = '\u26A0 UNCERTAIN (speed/TM crossover)<br><span style="color:#8a97ab">model says: ' + bodyLine + '</span>';
   tooltipEl.innerHTML = '<b>' + cell.xAxisName + ' ' + cell.xSpeed + ' SPD</b> × <b>' + cell.yAxisName + ' ' + cell.ySpeed + ' SPD</b><br>' + bodyLine;
