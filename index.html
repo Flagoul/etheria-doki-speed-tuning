@@ -1,6 +1,6 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Is your DPS moving last with Doki</title>
+<title>Doki team speed tuning</title>
 <style>
 body{font-family:system-ui;margin:0;background:#111827;color:#eee}.wrap{max-width:1200px;margin:auto;padding:20px}
 .controls,.chart{background:#1f2937;border:1px solid #3b475a;border-radius:12px;padding:14px;margin:12px 0}
@@ -24,18 +24,23 @@ canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block;c
 .trace-panel .trace-state{margin:3px 0;padding-left:4px}
 .trace-panel .trace-recipient{color:#f4df1a}
 .trace-panel .trace-final{margin-top:10px;padding-top:8px;border-top:1px solid #2b3546}
-.trace-panel .trace-final-line{margin:3px 0}
+.trace-panel .trace-final-branch{margin:0 0 10px 0;padding:6px 8px;background:#1a2333;border-radius:6px}
+.trace-panel .trace-final-sub{margin:3px 0}
+.trace-panel .trace-final-label{color:#9fb0c6;margin-right:4px}
+.trace-panel .trace-final-verdict{margin-top:4px}
 </style></head>
 <body><div class="wrap">
-<h1>Is your DPS moving last with Doki</h1>
-<p>If you want to know whether your Mass or Xiada is moving last to get all the buffs of your team, this is for you.</p>
+<h1>Doki team speed tuning</h1>
 <div class="controls">
 <div class="control-row">
 <label>Team<select id="teamSizeSelect"><option value="3">3 Character Team</option><option value="4">4 Character Team</option></select></label>
 </div>
 <div class="control-row">
 <label>Doki Speed<input id="dokiSpeedInput" type="number" value="375"></label>
+<label>DPS Name<input id="dpsNameInput" type="text" value="Xiada"></label>
+<label>Support Name<input id="supportNameInput" type="text" value="Ninfoniel"></label>
 <div id="fourCharacterControls" style="display:none;gap:12px;align-items:end">
+<label>Support 2 Name<input id="support2NameInput" type="text" value="Areal"></label>
 <label>Fixed Character<select id="fixedCharacterSelect"><option value="DPS">DPS</option><option value="Support">Support</option><option value="Support2">Support 2</option></select></label>
 <label>Fixed Speed<input id="fixedSpeedInput" type="number" value="216"></label>
 </div>
@@ -45,6 +50,7 @@ canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block;c
 <label>Max<input id="maxSpeedInput" type="number" value="375"></label>
 <label>Tie Tolerance %<input id="tieTolerancePercentInput" type="number" value="0.5" step="0.1" min="0"></label>
 <label>Push Amount (TM pts)<input id="pushAmountInput" type="number" value="12" step="1"></label>
+<label id="colorByContainer" style="display:none">Color By<select id="colorByModeSelect"><option value="dps">DPS Last / Not Last</option><option value="order" selected>Full Turn Order</option></select></label>
 <button onclick="draw()">Calculate</button>
 </div>
 </div>
@@ -54,7 +60,7 @@ canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block;c
 <div class="chart-body">
 <div class="chart-left">
 <canvas id="heatmapCanvas" width="800" height="800"></canvas>
-<div class="legend"><span><i class="sw" style="background:#4b155e"></i>DPS NOT LAST</span><span><i class="sw" style="background:#3b82a0"></i>DPS LAST</span><span><i class="sw" style="background:#19a89b"></i>TIE-BREAKER</span><span><i class="sw" style="background:#f4df1a"></i>RANDOM</span></div>
+<div id="legendContainer" class="legend"></div>
 </div>
 <div id="tracePanel" class="trace-panel"><p class="trace-placeholder">Click a cell in the heatmap to see Doki's tick-by-tick push trace for that matchup.</p></div>
 </div>
@@ -66,8 +72,15 @@ const ctx = heatmapCanvas.getContext('2d');
 const tooltipEl = document.getElementById('tip');
 const statusEl = document.getElementById('status');
 const tracePanelEl = document.getElementById('tracePanel');
-const outcomeColors = ['#4b155e', '#3b82a0', '#19a89b', '#f4df1a'];
+const legendContainerEl = document.getElementById('legendContainer');
 const HIT_COUNT = 8;
+
+// DPS-mode palette: [DPS NOT LAST, DPS LAST, TIE-BREAKER, RANDOM]
+const dpsModeColors = ['#4b155e', '#3b82a0', '#19a89b', '#f4df1a'];
+// Full-turn-order palette: one color per permutation, reused across team sizes.
+const orderPalette = ['#4b155e', '#3b82a0', '#e07b39', '#5fd068', '#eb5e8d', '#8a6fdf'];
+const orderTieColor = '#19a89b';
+const orderRandomColor = '#f4df1a';
 
 // ---------- Core exact-decimal TM model ----------
 
@@ -112,21 +125,36 @@ function simulateFinalTurnMeterStates(initialTurnMeters, hitCount, tieToleranceF
   return candidateStates;
 }
 
-// Final-order verdict for DPS in a single branch.
+// After the push sequence, everyone keeps filling TM at their own Speed until
+// the next 100-multiple threshold. This is how much real "time" a character
+// with a given final TM and Speed needs to reach their next action.
+// TM is allowed to sit above 100 (or even above 200 with enough pushes) —
+// mod 100 finds where they are within the current cycle, and (100-that)/speed
+// is the remaining time. A TM sitting exactly on a threshold needs 0 time.
+function timeToThreshold(turnMeter, speed){
+  const remainder = turnMeter % 100;
+  const remaining = (100 - remainder) % 100;
+  return remaining / speed;
+}
+
+// Final-order verdict for DPS in a single branch, based on real time-to-act
+// rather than raw TM: whoever needs less time to reach their next 100
+// threshold acts first, regardless of which one currently shows a higher TM.
 // Returns bit 1 = DPS acts last (TRUE), bit 2 = DPS does not act last (FALSE),
-// bit 4 = UNKNOWN / equal-TM-and-equal-Speed tie-breaker.
+// bit 4 = UNKNOWN (the two times are equal within tolerance — a genuine,
+// unresolved real-time tie).
 function verdictForDPS(dpsFinalTurnMeter, dpsSpeed, opponents, tieToleranceFraction){
+  const dpsTime = timeToThreshold(dpsFinalTurnMeter, dpsSpeed);
   let dpsAheadOfSomeone = false;
   let unresolvedTie = false;
   for (const opponent of opponents){
-    if (isTurnMeterTie(dpsFinalTurnMeter, opponent.turnMeter, tieToleranceFraction)){
-      if (dpsSpeed < opponent.speed) continue;            // DPS behind this opponent
-      else if (dpsSpeed > opponent.speed) dpsAheadOfSomeone = true;
-      else unresolvedTie = true;                            // equal TM, equal Speed
-    } else if (dpsFinalTurnMeter < opponent.turnMeter){
-      continue;                                              // DPS behind this opponent
+    const opponentTime = timeToThreshold(opponent.turnMeter, opponent.speed);
+    if (isTurnMeterTie(dpsTime, opponentTime, tieToleranceFraction)){
+      unresolvedTie = true;                                   // equal time-to-act, genuinely ambiguous
+    } else if (dpsTime > opponentTime){
+      continue;                                                // DPS needs longer -> acts after this opponent, fine
     } else {
-      dpsAheadOfSomeone = true;                              // DPS ahead of this opponent
+      dpsAheadOfSomeone = true;                                // DPS needs less time -> acts before this opponent
     }
   }
   if (dpsAheadOfSomeone) return 2;
@@ -134,57 +162,34 @@ function verdictForDPS(dpsFinalTurnMeter, dpsSpeed, opponents, tieToleranceFract
   return 1;
 }
 
-// Classify a full cell: run every branch, OR together every branch's verdict bit.
-// mask==1 -> always TRUE, mask==2 -> always FALSE, mask==4 -> always UNKNOWN,
-// anything else (multiple bits set) -> RANDOM (branches disagree).
-function classifyOutcome(initialTurnMeters, speeds, dpsIndex, tieToleranceFraction, pushAmount){
-  const finalStates = simulateFinalTurnMeterStates(initialTurnMeters, HIT_COUNT, tieToleranceFraction, pushAmount);
-  let outcomeMask = 0;
-  for (const state of finalStates){
-    const dpsFinalTurnMeter = state[dpsIndex];
-    const opponents = [];
-    for (let i = 0; i < state.length; i++){
-      if (i === dpsIndex) continue;
-      opponents.push({ turnMeter: state[i], speed: speeds[i] });
-    }
-    outcomeMask |= verdictForDPS(dpsFinalTurnMeter, speeds[dpsIndex], opponents, tieToleranceFraction);
-    if (outcomeMask === 7) break; // already RANDOM (all three outcomes present)
-  }
-  return outcomeMask;
-}
-
-function classifyThreeCharacterTeam(dpsSpeed, supportSpeed, dokiSpeed, tieToleranceFraction, pushAmount){
-  const dpsInitialTM = initialTurnMeter(dpsSpeed, dokiSpeed);
-  const supportInitialTM = initialTurnMeter(supportSpeed, dokiSpeed);
-  return classifyOutcome([dpsInitialTM, supportInitialTM], [dpsSpeed, supportSpeed], 0, tieToleranceFraction, pushAmount);
-}
-function classifyFourCharacterTeam(dpsSpeed, supportSpeed, support2Speed, dokiSpeed, tieToleranceFraction, pushAmount){
-  const dpsInitialTM = initialTurnMeter(dpsSpeed, dokiSpeed);
-  const supportInitialTM = initialTurnMeter(supportSpeed, dokiSpeed);
-  const support2InitialTM = initialTurnMeter(support2Speed, dokiSpeed);
-  return classifyOutcome([dpsInitialTM, supportInitialTM, support2InitialTM], [dpsSpeed, supportSpeed, support2Speed], 0, tieToleranceFraction, pushAmount);
-}
-function outcomeLabel(mask){
-  if (mask === 1) return 'DPS LAST';
-  if (mask === 2) return 'DPS NOT LAST';
+function dpsOutcomeLabel(mask, dpsDisplayName){
+  const label = dpsDisplayName || 'DPS';
+  if (mask === 1) return label + ' LAST';
+  if (mask === 2) return label + ' NOT LAST';
   if (mask === 4) return 'TIE-BREAKER (unknown)';
   return 'RANDOM';
 }
 
-// Compares two characters for final turn order: higher TM acts first; if tied
-// within tolerance, higher Speed acts first; if both TM and Speed are equal,
-// the order between them is unresolved (returns 0).
+// Compares two characters for final turn order: whoever needs less real time
+// to reach their next 100 threshold acts first. If the two times are equal
+// within tolerance, the order between them is a genuine unresolved tie
+// (returns 0) — Speed is already fully baked into the time calculation, so
+// there's no separate Speed fallback step anymore.
 function compareFinalOrder(tmA, speedA, tmB, speedB, tieToleranceFraction){
-  if (isTurnMeterTie(tmA, tmB, tieToleranceFraction)){
-    if (speedA !== speedB) return speedB - speedA;
-    return 0;
-  }
-  return tmB - tmA;
+  const timeA = timeToThreshold(tmA, speedA), timeB = timeToThreshold(tmB, speedB);
+  if (isTurnMeterTie(timeA, timeB, tieToleranceFraction)) return 0;
+  return timeA - timeB;
+}
+
+// True if two characters are a genuine unresolved tie for final order, i.e.
+// their time-to-next-threshold values are equal within tolerance.
+function isFinalOrderTie(tmA, speedA, tmB, speedB, tieToleranceFraction){
+  return isTurnMeterTie(timeToThreshold(tmA, speedA), timeToThreshold(tmB, speedB), tieToleranceFraction);
 }
 
 // Builds one line showing the whole team's final state, ordered from first
-// mover to last mover. An unresolved tie (equal TM and equal Speed) between
-// neighbors is shown with "≈" instead of "→".
+// mover to last mover (by time-to-next-threshold). An unresolved tie is
+// shown with "≈" instead of "→".
 function buildTurnOrderLine(names, tmValues, speeds, tieToleranceFraction){
   const order = names.map((_, i) => i).sort((a, b) => compareFinalOrder(tmValues[a], speeds[a], tmValues[b], speeds[b], tieToleranceFraction));
   const parts = [];
@@ -193,11 +198,98 @@ function buildTurnOrderLine(names, tmValues, speeds, tieToleranceFraction){
     parts.push(names[i] + ' ' + tmValues[i].toFixed(4));
     if (k < order.length - 1){
       const j = order[k + 1];
-      const unresolvedTie = isTurnMeterTie(tmValues[i], tmValues[j], tieToleranceFraction) && speeds[i] === speeds[j];
+      const unresolvedTie = isFinalOrderTie(tmValues[i], speeds[i], tmValues[j], speeds[j], tieToleranceFraction);
       parts.push(unresolvedTie ? ' \u2248 ' : ' \u2192 ');
     }
   }
   return parts.join('');
+}
+
+// Builds one line showing the explicit "remaining TM ÷ Speed = time" check for
+// each character, in the same first-mover-to-last-mover order, so it's clear
+// exactly why a lower-TM-but-faster character can cut in front of a
+// higher-TM-but-slower one.
+function buildTimeToActionLine(names, tmValues, speeds, tieToleranceFraction){
+  const order = names.map((_, i) => i).sort((a, b) => compareFinalOrder(tmValues[a], speeds[a], tmValues[b], speeds[b], tieToleranceFraction));
+  const parts = [];
+  for (let k = 0; k < order.length; k++){
+    const i = order[k];
+    const remainder = tmValues[i] % 100;
+    const remaining = (100 - remainder) % 100;
+    const time = remaining / speeds[i];
+    parts.push(names[i] + ' ' + remaining.toFixed(4) + '\u00f7' + speeds[i] + '=' + time.toFixed(5));
+    if (k < order.length - 1){
+      const j = order[k + 1];
+      const unresolvedTie = isFinalOrderTie(tmValues[i], speeds[i], tmValues[j], speeds[j], tieToleranceFraction);
+      parts.push(unresolvedTie ? ' \u2248 ' : ' \u2192 ');
+    }
+  }
+  return parts.join('');
+}
+
+// Canonical order key for a final state, e.g. "0>1>2" (DPS first, then
+// Support, then Support 2) or "0>1=2" if Support and Support 2 are an
+// unresolved tie (equal time-to-next-threshold) for last place.
+function fullOrderKey(tmValues, speeds, tieToleranceFraction){
+  const order = tmValues.map((_, i) => i).sort((a, b) => compareFinalOrder(tmValues[a], speeds[a], tmValues[b], speeds[b], tieToleranceFraction));
+  const keyParts = [];
+  let i = 0;
+  while (i < order.length){
+    const group = [order[i]];
+    let j = i + 1;
+    while (j < order.length && isFinalOrderTie(tmValues[order[i]], speeds[order[i]], tmValues[order[j]], speeds[order[j]], tieToleranceFraction)){
+      group.push(order[j]); j++;
+    }
+    group.sort((a, b) => a - b);
+    keyParts.push(group.join('='));
+    i = j;
+  }
+  return keyParts.join('>');
+}
+
+// All n! non-tied orderings of n characters, e.g. for n=3:
+// ["0>1>2","0>2>1","1>0>2","1>2>0","2>0>1","2>1>0"]. Used to give every
+// permutation a stable, repeatable color.
+function generatePermutationKeys(n){
+  const indices = Array.from({ length: n }, (_, i) => i);
+  const results = [];
+  (function permute(current){
+    if (current.length === n){ results.push(current.join('>')); return; }
+    for (const v of indices){
+      if (!current.includes(v)) permute([...current, v]);
+    }
+  })([]);
+  return results;
+}
+
+function colorForOrderKey(key, permutationKeys){
+  if (key.includes('=')) return orderTieColor;
+  const idx = permutationKeys.indexOf(key);
+  return orderPalette[idx % orderPalette.length];
+}
+
+// Classify a full cell in one pass: runs the branch simulation once and
+// returns both the DPS-only verdict bitmask and the full-turn-order result
+// ({type:'ORDER',key} | {type:'TIE',key} | {type:'RANDOM'}).
+function classifyCell(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount){
+  const initialTurnMeters = speeds.map(sp => initialTurnMeter(sp, dokiSpeed));
+  const finalStates = simulateFinalTurnMeterStates(initialTurnMeters, HIT_COUNT, tieToleranceFraction, pushAmount);
+  let dpsMask = 0;
+  const orderKeys = new Set();
+  for (const state of finalStates){
+    const opponents = [];
+    for (let i = 1; i < state.length; i++) opponents.push({ turnMeter: state[i], speed: speeds[i] });
+    dpsMask |= verdictForDPS(state[0], speeds[0], opponents, tieToleranceFraction);
+    orderKeys.add(fullOrderKey(state, speeds, tieToleranceFraction));
+  }
+  let orderResult;
+  if (orderKeys.size > 1){
+    orderResult = { type: 'RANDOM' };
+  } else {
+    const key = [...orderKeys][0];
+    orderResult = key.includes('=') ? { type: 'TIE', key } : { type: 'ORDER', key };
+  }
+  return { dpsMask, orderResult };
 }
 
 // ---------- Tick-by-tick trace (for the click panel) ----------
@@ -233,13 +325,13 @@ function computeTraceLevels(initialTurnMeters, names, tieToleranceFraction, push
   return levels;
 }
 
-function renderTracePanel(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount, outcomeMask){
+function renderTracePanel(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount, dpsMask){
   const initialTurnMeters = names.map((n, i) => initialTurnMeter(speeds[i], dokiSpeed));
   const levels = computeTraceLevels(initialTurnMeters, names, tieToleranceFraction, pushAmount, HIT_COUNT);
 
   const matchupLine = names.map((n, i) => n + ' ' + speeds[i] + ' spd').join(' vs ') + ' (Doki ' + dokiSpeed + ' spd)';
   let html = '<div class="trace-header"><h3>' + matchupLine + '</h3>';
-  html += '<div>Overall cell result: <b>' + outcomeLabel(outcomeMask) + '</b></div>';
+  html += '<div>Overall cell result: <b>' + dpsOutcomeLabel(dpsMask, names[0]) + '</b></div>';
   html += '<div>Initial TM: ' + names.map((n, i) => n + '=' + initialTurnMeters[i].toFixed(4)).join(', ') + '</div></div>';
 
   for (let hit = 1; hit <= HIT_COUNT; hit++){
@@ -259,7 +351,12 @@ function renderTracePanel(names, speeds, dokiSpeed, tieToleranceFraction, pushAm
     for (let i = 1; i < names.length; i++) opponents.push({ turnMeter: entry.tm[i], speed: speeds[i] });
     const verdictMask = verdictForDPS(entry.tm[0], speeds[0], opponents, tieToleranceFraction);
     const turnOrderLine = buildTurnOrderLine(names, entry.tm, speeds, tieToleranceFraction);
-    html += '<div class="trace-final-line">' + turnOrderLine + ' &nbsp;&mdash;&nbsp; <b>' + outcomeLabel(verdictMask) + '</b></div>';
+    const timeToActionLine = buildTimeToActionLine(names, entry.tm, speeds, tieToleranceFraction);
+    html += '<div class="trace-final-branch">' +
+      '<div class="trace-final-sub"><span class="trace-final-label">After push:</span>' + turnOrderLine + '</div>' +
+      '<div class="trace-final-sub"><span class="trace-final-label">Time to next action (remaining TM \u00f7 speed):</span>' + timeToActionLine + '</div>' +
+      '<div class="trace-final-verdict"><b>' + dpsOutcomeLabel(verdictMask, names[0]) + '</b></div>' +
+      '</div>';
   }
   html += '</div>';
 
@@ -284,42 +381,98 @@ function runDraw(){
   const fixedSpeed = +document.getElementById('fixedSpeedInput').value;
   const tieToleranceFraction = (+document.getElementById('tieTolerancePercentInput').value) / 100;
   const pushAmount = +document.getElementById('pushAmountInput').value;
+  const colorByMode = isFourCharacterTeam ? document.getElementById('colorByModeSelect').value : 'dps';
+
+  const dpsName = document.getElementById('dpsNameInput').value || 'DPS';
+  const supportName = document.getElementById('supportNameInput').value || 'Support';
+  const support2Name = document.getElementById('support2NameInput').value || 'Support 2';
+  const names = isFourCharacterTeam ? [dpsName, supportName, support2Name] : [dpsName, supportName];
+  const permutationKeys = generatePermutationKeys(names.length);
 
   const speedValues = [];
   for (let speed = minSpeed; speed <= maxSpeed; speed++) speedValues.push(speed);
   const gridSize = speedValues.length;
-  const plotOriginX = 55, plotWidth = 720, plotHeight = 720;
-  const cellWidth = plotWidth / gridSize, cellHeight = plotHeight / gridSize;
   const cellData = [];
-  const outcomeCounts = [0, 0, 0, 0];
 
-  ctx.clearRect(0, 0, 800, 800);
   for (let row = 0; row < gridSize; row++){
     cellData[row] = [];
     for (let col = 0; col < gridSize; col++){
       const xSpeed = speedValues[col], ySpeed = speedValues[gridSize - 1 - row];
-      let outcomeMask, xAxisName, yAxisName, dpsSpeed, supportSpeed, support2Speed;
+      let xAxisName, yAxisName, dpsSpeed, supportSpeed, support2Speed;
       if (!isFourCharacterTeam){
         dpsSpeed = xSpeed; supportSpeed = ySpeed; support2Speed = null;
-        outcomeMask = classifyThreeCharacterTeam(dpsSpeed, supportSpeed, dokiSpeed, tieToleranceFraction, pushAmount);
-        xAxisName = 'DPS'; yAxisName = 'Support';
+        xAxisName = dpsName; yAxisName = supportName;
       } else {
         if (fixedCharacter == 'DPS'){
           dpsSpeed = fixedSpeed; supportSpeed = xSpeed; support2Speed = ySpeed;
-          xAxisName = 'Support'; yAxisName = 'Support 2';
+          xAxisName = supportName; yAxisName = support2Name;
         } else if (fixedCharacter == 'Support'){
           dpsSpeed = xSpeed; supportSpeed = fixedSpeed; support2Speed = ySpeed;
-          xAxisName = 'DPS'; yAxisName = 'Support 2';
+          xAxisName = dpsName; yAxisName = support2Name;
         } else {
           dpsSpeed = xSpeed; supportSpeed = ySpeed; support2Speed = fixedSpeed;
-          xAxisName = 'DPS'; yAxisName = 'Support';
+          xAxisName = dpsName; yAxisName = supportName;
         }
-        outcomeMask = classifyFourCharacterTeam(dpsSpeed, supportSpeed, support2Speed, dokiSpeed, tieToleranceFraction, pushAmount);
       }
-      const colorIndex = outcomeMask == 1 ? 1 : outcomeMask == 2 ? 0 : outcomeMask == 4 ? 2 : 3;
-      outcomeCounts[colorIndex]++;
-      cellData[row][col] = { xSpeed, ySpeed, outcomeMask, xAxisName, yAxisName, dpsSpeed, supportSpeed, support2Speed };
-      ctx.fillStyle = outcomeColors[colorIndex];
+      const speeds = isFourCharacterTeam ? [dpsSpeed, supportSpeed, support2Speed] : [dpsSpeed, supportSpeed];
+      const { dpsMask, orderResult } = classifyCell(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount);
+      cellData[row][col] = { xSpeed, ySpeed, xAxisName, yAxisName, dpsSpeed, supportSpeed, support2Speed, dpsMask, orderResult };
+    }
+  }
+
+  let xAxisLabel, yAxisLabel;
+  if (!isFourCharacterTeam){
+    xAxisLabel = dpsName + ' Speed'; yAxisLabel = supportName + ' Speed';
+  } else if (fixedCharacter == 'DPS'){
+    xAxisLabel = supportName + ' Speed'; yAxisLabel = support2Name + ' Speed';
+  } else if (fixedCharacter == 'Support'){
+    xAxisLabel = dpsName + ' Speed'; yAxisLabel = support2Name + ' Speed';
+  } else {
+    xAxisLabel = dpsName + ' Speed'; yAxisLabel = supportName + ' Speed';
+  }
+
+  heatmapCanvas._plotState = { cellData, speedValues, minSpeed, maxSpeed, dokiSpeed, tieToleranceFraction, pushAmount, isFourCharacterTeam, names, permutationKeys, xAxisLabel, yAxisLabel };
+  tracePanelEl.innerHTML = '<p class="trace-placeholder">Click a cell in the heatmap to see Doki\'s tick-by-tick push trace for that matchup.</p>';
+
+  paint(colorByMode);
+
+  const endTime = performance.now();
+  statusEl.textContent = gridSize.toLocaleString() + '×' + gridSize.toLocaleString() + ' cells, exact TM + ' + (tieToleranceFraction * 100) + '% tolerance, push=' + pushAmount + ', computed in ' + Math.round(endTime - startTime) + ' ms.';
+}
+
+// Repaints the canvas, stats, and legend from already-computed cellData — no
+// re-simulation needed, so toggling Color By is instant.
+function paint(colorByMode){
+  const plotState = heatmapCanvas._plotState;
+  if (!plotState) return;
+  const { cellData, speedValues, minSpeed, maxSpeed, permutationKeys, names, xAxisLabel, yAxisLabel } = plotState;
+  plotState.colorByMode = colorByMode;
+
+  const gridSize = speedValues.length;
+  const plotOriginX = 55, plotWidth = 720, plotHeight = 720;
+  const cellWidth = plotWidth / gridSize, cellHeight = plotHeight / gridSize;
+
+  ctx.clearRect(0, 0, 800, 800);
+
+  const dpsCounts = [0, 0, 0, 0];
+  const orderCounts = new Map(); // key -> count ('TIE' and 'RANDOM' are special keys)
+
+  for (let row = 0; row < gridSize; row++){
+    for (let col = 0; col < gridSize; col++){
+      const cell = cellData[row][col];
+      let fillColor;
+      if (colorByMode === 'order'){
+        let bucketKey;
+        if (cell.orderResult.type === 'RANDOM'){ bucketKey = 'RANDOM'; fillColor = orderRandomColor; }
+        else if (cell.orderResult.type === 'TIE'){ bucketKey = 'TIE'; fillColor = orderTieColor; }
+        else { bucketKey = cell.orderResult.key; fillColor = colorForOrderKey(cell.orderResult.key, permutationKeys); }
+        orderCounts.set(bucketKey, (orderCounts.get(bucketKey) || 0) + 1);
+      } else {
+        const colorIndex = cell.dpsMask == 1 ? 1 : cell.dpsMask == 2 ? 0 : cell.dpsMask == 4 ? 2 : 3;
+        fillColor = dpsModeColors[colorIndex];
+        dpsCounts[colorIndex]++;
+      }
+      ctx.fillStyle = fillColor;
       ctx.fillRect(plotOriginX + col * cellWidth, 20 + row * cellHeight, Math.ceil(cellWidth) + 1, Math.ceil(cellHeight) + 1);
     }
   }
@@ -332,36 +485,44 @@ function runDraw(){
     const row = maxSpeed - speed, tickY = 20 + (row + .5) * cellHeight;
     ctx.textAlign = 'right'; ctx.fillText(speed, 47, tickY + 4); ctx.textAlign = 'center';
   }
-
-  let xAxisLabel, yAxisLabel;
-  if (!isFourCharacterTeam){
-    xAxisLabel = 'DPS Speed'; yAxisLabel = 'Support Speed';
-  } else if (fixedCharacter == 'DPS'){
-    xAxisLabel = 'Support Speed'; yAxisLabel = 'Support 2 Speed';
-  } else if (fixedCharacter == 'Support'){
-    xAxisLabel = 'DPS Speed'; yAxisLabel = 'Support 2 Speed';
-  } else {
-    xAxisLabel = 'DPS Speed'; yAxisLabel = 'Support Speed';
-  }
   ctx.fillText(xAxisLabel, plotOriginX + plotWidth / 2, 790);
   ctx.save(); ctx.translate(12, 380); ctx.rotate(-Math.PI / 2); ctx.fillText(yAxisLabel, 0, 0); ctx.restore();
 
-  document.getElementById('stats').innerHTML = ['DPS NOT LAST', 'DPS LAST', 'TIE-BREAKER', 'RANDOM']
-    .map((name, i) => '<div class="stat">' + name + ' <b>' + outcomeCounts[i].toLocaleString() + '</b></div>').join('');
+  plotState.plotOriginX = plotOriginX; plotState.cellWidth = cellWidth; plotState.cellHeight = cellHeight;
 
-  heatmapCanvas._plotState = { cellData, plotOriginX, cellWidth, cellHeight, speedValues, dokiSpeed, tieToleranceFraction, pushAmount, isFourCharacterTeam };
-  tracePanelEl.innerHTML = '<p class="trace-placeholder">Click a cell in the heatmap to see Doki\'s tick-by-tick push trace for that matchup.</p>';
-  const endTime = performance.now();
-  statusEl.textContent = gridSize.toLocaleString() + '×' + gridSize.toLocaleString() + ' cells, exact TM + ' + (tieToleranceFraction * 100) + '% tolerance, push=' + pushAmount + ', computed in ' + Math.round(endTime - startTime) + ' ms.';
+  if (colorByMode === 'order'){
+    document.getElementById('stats').innerHTML = permutationKeys.map((key, i) => {
+      const label = key.split('>').map(idx => names[+idx]).join(' \u2192 ');
+      const count = orderCounts.get(key) || 0;
+      return '<div class="stat"><i class="sw" style="background:' + orderPalette[i % orderPalette.length] + '"></i>' + label + ' <b>' + count.toLocaleString() + '</b></div>';
+    }).join('') +
+      '<div class="stat"><i class="sw" style="background:' + orderTieColor + '"></i>TIE-BREAKER <b>' + (orderCounts.get('TIE') || 0).toLocaleString() + '</b></div>' +
+      '<div class="stat"><i class="sw" style="background:' + orderRandomColor + '"></i>RANDOM <b>' + (orderCounts.get('RANDOM') || 0).toLocaleString() + '</b></div>';
+    legendContainerEl.innerHTML = permutationKeys.map((key, i) => {
+      const label = key.split('>').map(idx => names[+idx]).join(' \u2192 ');
+      return '<span><i class="sw" style="background:' + orderPalette[i % orderPalette.length] + '"></i>' + label + '</span>';
+    }).join('') +
+      '<span><i class="sw" style="background:' + orderTieColor + '"></i>TIE-BREAKER</span>' +
+      '<span><i class="sw" style="background:' + orderRandomColor + '"></i>RANDOM</span>';
+  } else {
+    const dpsLabel = names[0];
+    document.getElementById('stats').innerHTML = [dpsLabel + ' NOT LAST', dpsLabel + ' LAST', 'TIE-BREAKER', 'RANDOM']
+      .map((name, i) => '<div class="stat">' + name + ' <b>' + dpsCounts[i].toLocaleString() + '</b></div>').join('');
+    legendContainerEl.innerHTML = '<span><i class="sw" style="background:' + dpsModeColors[0] + '"></i>' + dpsLabel + ' NOT LAST</span>' +
+      '<span><i class="sw" style="background:' + dpsModeColors[1] + '"></i>' + dpsLabel + ' LAST</span>' +
+      '<span><i class="sw" style="background:' + dpsModeColors[2] + '"></i>TIE-BREAKER</span>' +
+      '<span><i class="sw" style="background:' + dpsModeColors[3] + '"></i>RANDOM</span>';
+  }
 }
 
 document.getElementById('teamSizeSelect').onchange = () => {
   document.getElementById('fourCharacterControls').style.display = document.getElementById('teamSizeSelect').value == '4' ? 'flex' : 'none';
   draw();
 };
+document.getElementById('colorByModeSelect').onchange = () => paint(document.getElementById('colorByModeSelect').value);
 
 function getCellFromEvent(e){
-  const plotState = heatmapCanvas._plotState; if (!plotState) return null;
+  const plotState = heatmapCanvas._plotState; if (!plotState || plotState.plotOriginX === undefined) return null;
   const rect = heatmapCanvas.getBoundingClientRect();
   const canvasX = (e.clientX - rect.left) * heatmapCanvas.width / rect.width;
   const canvasY = (e.clientY - rect.top) * heatmapCanvas.height / rect.height;
@@ -374,11 +535,19 @@ function getCellFromEvent(e){
 heatmapCanvas.onmousemove = e => {
   const hit = getCellFromEvent(e);
   if (!hit){ tooltipEl.style.display = 'none'; return; }
-  const { cell } = hit;
+  const { plotState, cell } = hit;
   tooltipEl.style.display = 'block';
   tooltipEl.style.left = e.clientX + 12 + 'px';
   tooltipEl.style.top = e.clientY + 12 + 'px';
-  tooltipEl.innerHTML = '<b>' + cell.xAxisName + ' ' + cell.xSpeed + ' SPD</b> × <b>' + cell.yAxisName + ' ' + cell.ySpeed + ' SPD</b><br>' + outcomeLabel(cell.outcomeMask);
+  let bodyLine;
+  if (plotState.colorByMode === 'order'){
+    if (cell.orderResult.type === 'RANDOM') bodyLine = 'RANDOM';
+    else if (cell.orderResult.type === 'TIE') bodyLine = 'TIE-BREAKER (unknown)';
+    else bodyLine = cell.orderResult.key.split('>').map(idx => plotState.names[+idx]).join(' \u2192 ');
+  } else {
+    bodyLine = dpsOutcomeLabel(cell.dpsMask, plotState.names[0]);
+  }
+  tooltipEl.innerHTML = '<b>' + cell.xAxisName + ' ' + cell.xSpeed + ' SPD</b> × <b>' + cell.yAxisName + ' ' + cell.ySpeed + ' SPD</b><br>' + bodyLine;
 };
 heatmapCanvas.onmouseleave = () => tooltipEl.style.display = 'none';
 
@@ -386,9 +555,8 @@ heatmapCanvas.onclick = e => {
   const hit = getCellFromEvent(e);
   if (!hit) return;
   const { plotState, cell } = hit;
-  const names = plotState.isFourCharacterTeam ? ['DPS', 'Support', 'Support 2'] : ['DPS', 'Support'];
   const speeds = plotState.isFourCharacterTeam ? [cell.dpsSpeed, cell.supportSpeed, cell.support2Speed] : [cell.dpsSpeed, cell.supportSpeed];
-  renderTracePanel(names, speeds, plotState.dokiSpeed, plotState.tieToleranceFraction, plotState.pushAmount, cell.outcomeMask);
+  renderTracePanel(plotState.names, speeds, plotState.dokiSpeed, plotState.tieToleranceFraction, plotState.pushAmount, cell.dpsMask);
 };
 
 draw();
