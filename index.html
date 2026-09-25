@@ -37,12 +37,14 @@ canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block;c
 </div>
 <div class="control-row">
 <label>Doki Speed<input id="dokiSpeedInput" type="number" value="375"></label>
-<label>DPS Name<input id="dpsNameInput" type="text" value="Xiada"></label>
-<label>Support Name<input id="supportNameInput" type="text" value="Ninfoniel"></label>
-<div id="fourCharacterControls" style="display:none;gap:12px;align-items:end">
-<label>Support 2 Name<input id="support2NameInput" type="text" value="Areal"></label>
+<div id="fixedCharacterControls" style="display:none;gap:12px;align-items:end">
 <label>Fixed Character<select id="fixedCharacterSelect"><option value="DPS">DPS</option><option value="Support">Support</option><option value="Support2">Support 2</option></select></label>
 <label>Fixed Speed<input id="fixedSpeedInput" type="number" value="216"></label>
+</div>
+<label>DPS Name<input id="dpsNameInput" type="text" value="Xiada"></label>
+<label>Support Name<input id="supportNameInput" type="text" value="Ninfoniel"></label>
+<div id="support2NameControls" style="display:none;gap:12px;align-items:end">
+<label>Support 2 Name<input id="support2NameInput" type="text" value="Areal"></label>
 </div>
 </div>
 <div class="control-row">
@@ -515,8 +517,25 @@ function paint(colorByMode){
   }
 }
 
+function syncFixedCharacterOptionLabels(){
+  const dpsName = document.getElementById('dpsNameInput').value || 'DPS';
+  const supportName = document.getElementById('supportNameInput').value || 'Support';
+  const support2Name = document.getElementById('support2NameInput').value || 'Support 2';
+  const select = document.getElementById('fixedCharacterSelect');
+  select.options[0].textContent = dpsName;
+  select.options[1].textContent = supportName;
+  select.options[2].textContent = support2Name;
+}
+document.getElementById('dpsNameInput').oninput = syncFixedCharacterOptionLabels;
+document.getElementById('supportNameInput').oninput = syncFixedCharacterOptionLabels;
+document.getElementById('support2NameInput').oninput = syncFixedCharacterOptionLabels;
+syncFixedCharacterOptionLabels();
+
 document.getElementById('teamSizeSelect').onchange = () => {
-  document.getElementById('fourCharacterControls').style.display = document.getElementById('teamSizeSelect').value == '4' ? 'flex' : 'none';
+  const isFour = document.getElementById('teamSizeSelect').value == '4';
+  document.getElementById('fixedCharacterControls').style.display = isFour ? 'flex' : 'none';
+  document.getElementById('support2NameControls').style.display = isFour ? 'flex' : 'none';
+  document.getElementById('colorByContainer').style.display = isFour ? 'flex' : 'none';
   draw();
 };
 document.getElementById('colorByModeSelect').onchange = () => paint(document.getElementById('colorByModeSelect').value);
