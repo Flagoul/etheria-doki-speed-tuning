@@ -31,6 +31,7 @@ canvas{width:100%;max-width:800px;height:auto;background:#111827;display:block;c
 </style></head>
 <body><div class="wrap">
 <h1>Doki team speed tuning</h1>
+<p>Work in progress</p>
 <div class="controls">
 <div class="control-row">
 <label>Team<select id="teamSizeSelect"><option value="3">3 Character Team</option><option value="4">4 Character Team</option></select></label>
@@ -270,19 +271,45 @@ function colorForOrderKey(key, permutationKeys){
   return orderPalette[idx % orderPalette.length];
 }
 
+// Color used to flag cells where the model's prediction isn't trustworthy —
+// see findCrossoverPairs below for what triggers it.
+const uncertainColor = '#ef4444';
+
+// Finds every pair of characters in a final state where one has a strictly
+// higher TM than the other but is also slower. When TM and Speed "agree"
+// (whoever has more TM is also faster, or whoever has less TM is also
+// slower), the order call is trustworthy. When they disagree — someone
+// banked more TM but can't out-race a faster rival to the next threshold —
+// real testing has shown the outcome isn't reliably predictable by either
+// raw TM or the time-to-threshold model, so these get flagged rather than
+// asserting an order we can't actually back up.
+// Returns an array of [higherTmButSlowerIndex, fasterButLowerTmIndex] pairs.
+function findCrossoverPairs(tmValues, speeds){
+  const pairs = [];
+  for (let i = 0; i < tmValues.length; i++){
+    for (let j = 0; j < tmValues.length; j++){
+      if (i !== j && tmValues[i] > tmValues[j] && speeds[i] < speeds[j]) pairs.push([i, j]);
+    }
+  }
+  return pairs;
+}
+
 // Classify a full cell in one pass: runs the branch simulation once and
-// returns both the DPS-only verdict bitmask and the full-turn-order result
-// ({type:'ORDER',key} | {type:'TIE',key} | {type:'RANDOM'}).
+// returns the DPS-only verdict bitmask, the full-turn-order result
+// ({type:'ORDER',key} | {type:'TIE',key} | {type:'RANDOM'}), and whether
+// any branch contains an untrustworthy TM/Speed crossover.
 function classifyCell(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount){
   const initialTurnMeters = speeds.map(sp => initialTurnMeter(sp, dokiSpeed));
   const finalStates = simulateFinalTurnMeterStates(initialTurnMeters, HIT_COUNT, tieToleranceFraction, pushAmount);
   let dpsMask = 0;
+  let isUncertain = false;
   const orderKeys = new Set();
   for (const state of finalStates){
     const opponents = [];
     for (let i = 1; i < state.length; i++) opponents.push({ turnMeter: state[i], speed: speeds[i] });
     dpsMask |= verdictForDPS(state[0], speeds[0], opponents, tieToleranceFraction);
     orderKeys.add(fullOrderKey(state, speeds, tieToleranceFraction));
+    if (findCrossoverPairs(state, speeds).length > 0) isUncertain = true;
   }
   let orderResult;
   if (orderKeys.size > 1){
@@ -291,7 +318,7 @@ function classifyCell(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount
     const key = [...orderKeys][0];
     orderResult = key.includes('=') ? { type: 'TIE', key } : { type: 'ORDER', key };
   }
-  return { dpsMask, orderResult };
+  return { dpsMask, orderResult, isUncertain };
 }
 
 // ---------- Tick-by-tick trace (for the click panel) ----------
@@ -354,9 +381,16 @@ function renderTracePanel(names, speeds, dokiSpeed, tieToleranceFraction, pushAm
     const verdictMask = verdictForDPS(entry.tm[0], speeds[0], opponents, tieToleranceFraction);
     const turnOrderLine = buildTurnOrderLine(names, entry.tm, speeds, tieToleranceFraction);
     const timeToActionLine = buildTimeToActionLine(names, entry.tm, speeds, tieToleranceFraction);
+    const crossoverPairs = findCrossoverPairs(entry.tm, speeds);
+    const crossoverLines = crossoverPairs.map(([slowerIdx, fasterIdx]) =>
+      '<div class="trace-final-sub" style="color:' + uncertainColor + '">\u26A0 ' + names[slowerIdx] + ' ' + entry.tm[slowerIdx].toFixed(4) +
+      ' has higher TM than ' + names[fasterIdx] + ' ' + entry.tm[fasterIdx].toFixed(4) +
+      ' but is slower (' + speeds[slowerIdx] + ' < ' + speeds[fasterIdx] + ') \u2014 order between them is not reliable</div>'
+    ).join('');
     html += '<div class="trace-final-branch">' +
       '<div class="trace-final-sub"><span class="trace-final-label">After push:</span>' + turnOrderLine + '</div>' +
       '<div class="trace-final-sub"><span class="trace-final-label">Time to next action (remaining TM \u00f7 speed):</span>' + timeToActionLine + '</div>' +
+      crossoverLines +
       '<div class="trace-final-verdict"><b>' + dpsOutcomeLabel(verdictMask, names[0]) + '</b></div>' +
       '</div>';
   }
@@ -417,8 +451,8 @@ function runDraw(){
         }
       }
       const speeds = isFourCharacterTeam ? [dpsSpeed, supportSpeed, support2Speed] : [dpsSpeed, supportSpeed];
-      const { dpsMask, orderResult } = classifyCell(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount);
-      cellData[row][col] = { xSpeed, ySpeed, xAxisName, yAxisName, dpsSpeed, supportSpeed, support2Speed, dpsMask, orderResult };
+      const { dpsMask, orderResult, isUncertain } = classifyCell(names, speeds, dokiSpeed, tieToleranceFraction, pushAmount);
+      cellData[row][col] = { xSpeed, ySpeed, xAxisName, yAxisName, dpsSpeed, supportSpeed, support2Speed, dpsMask, orderResult, isUncertain };
     }
   }
 
@@ -458,12 +492,16 @@ function paint(colorByMode){
 
   const dpsCounts = [0, 0, 0, 0];
   const orderCounts = new Map(); // key -> count ('TIE' and 'RANDOM' are special keys)
+  let uncertainCount = 0;
 
   for (let row = 0; row < gridSize; row++){
     for (let col = 0; col < gridSize; col++){
       const cell = cellData[row][col];
       let fillColor;
-      if (colorByMode === 'order'){
+      if (cell.isUncertain){
+        fillColor = uncertainColor;
+        uncertainCount++;
+      } else if (colorByMode === 'order'){
         let bucketKey;
         if (cell.orderResult.type === 'RANDOM'){ bucketKey = 'RANDOM'; fillColor = orderRandomColor; }
         else if (cell.orderResult.type === 'TIE'){ bucketKey = 'TIE'; fillColor = orderTieColor; }
@@ -492,6 +530,9 @@ function paint(colorByMode){
 
   plotState.plotOriginX = plotOriginX; plotState.cellWidth = cellWidth; plotState.cellHeight = cellHeight;
 
+  const uncertainStat = '<div class="stat"><i class="sw" style="background:' + uncertainColor + '"></i>UNCERTAIN <b>' + uncertainCount.toLocaleString() + '</b></div>';
+  const uncertainLegend = '<span><i class="sw" style="background:' + uncertainColor + '"></i>UNCERTAIN (speed/TM crossover)</span>';
+
   if (colorByMode === 'order'){
     document.getElementById('stats').innerHTML = permutationKeys.map((key, i) => {
       const label = key.split('>').map(idx => names[+idx]).join(' \u2192 ');
@@ -499,21 +540,25 @@ function paint(colorByMode){
       return '<div class="stat"><i class="sw" style="background:' + orderPalette[i % orderPalette.length] + '"></i>' + label + ' <b>' + count.toLocaleString() + '</b></div>';
     }).join('') +
       '<div class="stat"><i class="sw" style="background:' + orderTieColor + '"></i>TIE-BREAKER <b>' + (orderCounts.get('TIE') || 0).toLocaleString() + '</b></div>' +
-      '<div class="stat"><i class="sw" style="background:' + orderRandomColor + '"></i>RANDOM <b>' + (orderCounts.get('RANDOM') || 0).toLocaleString() + '</b></div>';
+      '<div class="stat"><i class="sw" style="background:' + orderRandomColor + '"></i>RANDOM <b>' + (orderCounts.get('RANDOM') || 0).toLocaleString() + '</b></div>' +
+      uncertainStat;
     legendContainerEl.innerHTML = permutationKeys.map((key, i) => {
       const label = key.split('>').map(idx => names[+idx]).join(' \u2192 ');
       return '<span><i class="sw" style="background:' + orderPalette[i % orderPalette.length] + '"></i>' + label + '</span>';
     }).join('') +
       '<span><i class="sw" style="background:' + orderTieColor + '"></i>TIE-BREAKER</span>' +
-      '<span><i class="sw" style="background:' + orderRandomColor + '"></i>RANDOM</span>';
+      '<span><i class="sw" style="background:' + orderRandomColor + '"></i>RANDOM</span>' +
+      uncertainLegend;
   } else {
     const dpsLabel = names[0];
     document.getElementById('stats').innerHTML = [dpsLabel + ' NOT LAST', dpsLabel + ' LAST', 'TIE-BREAKER', 'RANDOM']
-      .map((name, i) => '<div class="stat">' + name + ' <b>' + dpsCounts[i].toLocaleString() + '</b></div>').join('');
+      .map((name, i) => '<div class="stat">' + name + ' <b>' + dpsCounts[i].toLocaleString() + '</b></div>').join('') +
+      uncertainStat;
     legendContainerEl.innerHTML = '<span><i class="sw" style="background:' + dpsModeColors[0] + '"></i>' + dpsLabel + ' NOT LAST</span>' +
       '<span><i class="sw" style="background:' + dpsModeColors[1] + '"></i>' + dpsLabel + ' LAST</span>' +
       '<span><i class="sw" style="background:' + dpsModeColors[2] + '"></i>TIE-BREAKER</span>' +
-      '<span><i class="sw" style="background:' + dpsModeColors[3] + '"></i>RANDOM</span>';
+      '<span><i class="sw" style="background:' + dpsModeColors[3] + '"></i>RANDOM</span>' +
+      uncertainLegend;
   }
 }
 
@@ -566,6 +611,7 @@ heatmapCanvas.onmousemove = e => {
   } else {
     bodyLine = dpsOutcomeLabel(cell.dpsMask, plotState.names[0]);
   }
+  if (cell.isUncertain) bodyLine = '\u26A0 UNCERTAIN (speed/TM crossover)<br><span style="color:#8a97ab">model says: ' + bodyLine + '</span>';
   tooltipEl.innerHTML = '<b>' + cell.xAxisName + ' ' + cell.xSpeed + ' SPD</b> × <b>' + cell.yAxisName + ' ' + cell.ySpeed + ' SPD</b><br>' + bodyLine;
 };
 heatmapCanvas.onmouseleave = () => tooltipEl.style.display = 'none';
